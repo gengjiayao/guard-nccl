@@ -27,6 +27,8 @@
 #include <mutex>
 #include <condition_variable>
 
+struct ncclRecvFlowControl;
+
 typedef enum : uint8_t {
   ncclPatternRing,
   ncclPatternRingTwice,
@@ -374,6 +376,10 @@ struct ncclProxyState {
 
   // Queue of expected responses from the proxy
   struct ncclExpectedProxyResponse* expectedResponses;
+
+  // Receiver-driven flow control
+  struct ncclRecvFlowControl* recvFlowControl;
+  void* fcControlContext;  // ncclFcControlContext*, opaque to avoid header dependency
 };
 
 enum proxyConnectState {

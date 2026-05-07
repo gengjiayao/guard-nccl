@@ -17,6 +17,7 @@
 #include "cpuset.h"
 #include "compiler.h"
 #include "os.h"
+#include "flowcontrol.h"
 
 #include <assert.h>
 #include <algorithm>
@@ -1964,6 +1965,14 @@ ncclResult_t ncclProxyCreate(struct ncclComm* comm) {
     proxyState->directMode = comm->directMode;
     memcpy(proxyState->buffSizes, comm->buffSizes, sizeof(comm->buffSizes));
 
+    // Initialize receiver-driven flow control
+    proxyState->recvFlowControl = new ncclRecvFlowControl{};
+    // Default 25 GB/s (~200 Gbps), overridable via NCCL_RECV_FC_BW_GBS env var
+    double defaultBw = 25.0 * 1024.0 * 1024.0 * 1024.0;
+    NCCLCHECK(ncclFlowControlInit(proxyState->recvFlowControl, proxyState->tpRank, defaultBw));
+    // The callback is set later by net.cc when control sockets are established
+    proxyState->fcControlContext = nullptr;
+
     comm->proxyState->thread = std::thread(ncclProxyService, comm->proxyState);
     ncclSetThreadName(comm->proxyState->thread, "NCCL Service %2d", comm->cudaDev);
 
@@ -2030,6 +2039,13 @@ ncclResult_t ncclProxyDestroy(struct ncclComm* comm) {
     free(sharedProxyState->proxyOps);
     free(sharedProxyState->sharedDevMems);
     expectedProxyResponseFree(sharedProxyState);
+    if (sharedProxyState->recvFlowControl) {
+      ncclFlowControlDestroy(sharedProxyState->recvFlowControl);
+      delete sharedProxyState->recvFlowControl;
+    }
+    if (sharedProxyState->fcControlContext) {
+      free(sharedProxyState->fcControlContext);
+    }
     delete sharedProxyState;
   }
   return ncclSuccess;

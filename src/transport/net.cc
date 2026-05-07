@@ -18,7 +18,12 @@
 #include "shm.h"
 #include "compiler.h"
 #include <assert.h>
+#include <time.h>
+#include <fcntl.h>
+#include <errno.h>
 #include "register_inline.h"
+#include "flowcontrol.h"
+#include "socket.h"
 
 static_assert(sizeof(ncclNetHandle_t) <= CONNECT_SIZE, "NET Connect info is too large");
 
@@ -85,6 +90,34 @@ struct connectMap {
   } offsets;
 };
 
+// Token bucket for sender-side rate enforcement.
+// The receiver authorizes a rate (bytes/sec); the sender paces isend() calls
+// by consuming tokens proportional to the bytes sent.
+struct ncclFcTokenBucket {
+  double tokens;           // Available bytes to send
+  double rate;             // Authorized rate in bytes/sec (0 = paused)
+  double burstSize;        // Max tokens (limits burst after idle)
+  struct timespec lastRefill;
+  bool initialized;
+};
+
+// Per-flow rate state on the sender side, indexed by (channelId, opCount).
+// Stored in a flat array; the sender proxy scans on rate message arrival.
+#define NCCL_FC_SENDER_MAX_FLOWS 64
+
+struct ncclFcSenderFlow {
+  int channelId;
+  uint64_t opCount;
+  struct ncclFcTokenBucket bucket;
+  bool active;
+};
+
+struct ncclFcSenderState {
+  struct ncclFcSenderFlow flows[NCCL_FC_SENDER_MAX_FLOWS];
+  struct ncclSocket controlSock;  // Connected to receiver's control listen socket
+  bool hasControlSock;
+};
+
 struct sendNetResources {
   struct connectMap map;
   void* netSendComm;
@@ -113,6 +146,9 @@ struct sendNetResources {
   ncclNetDeviceType netDeviceType;
   ncclNetDeviceHandle_t* netDeviceHandle;
   size_t maxP2pBytes;
+
+  // Receiver-driven flow control: sender-side state
+  struct ncclFcSenderState fcState;
 };
 
 struct recvNetResources {
@@ -147,6 +183,11 @@ struct recvNetResources {
   ncclNetDeviceType netDeviceType;
   ncclNetDeviceHandle_t* netDeviceHandle;
   size_t maxP2pBytes;
+
+  // Receiver-driven flow control: control socket to push rate updates to sender
+  struct ncclSocket controlListenSock;  // Listen socket created during setup
+  struct ncclSocket controlSock;        // Accepted connection to sender
+  bool hasControlSock;
 };
 
 struct netRegInfo {
@@ -185,6 +226,8 @@ struct setupReq {
 NCCL_PARAM(NetOptionalRecvCompletion, "NET_OPTIONAL_RECV_COMPLETION", 1);
 
 static_assert(sizeof(ncclNetHandle_t) + sizeof(int) <= CONNECT_SIZE, "Not large enough ncclConnect to hold ncclNetHandle_t and useGdr flag");
+static_assert(sizeof(ncclNetHandle_t) + sizeof(int) + sizeof(union ncclSocketAddress) + sizeof(int) <= CONNECT_SIZE,
+              "Not large enough ncclConnect to hold ncclNetHandle_t + useGdr + fcControlAddr + hasFcControl");
 
 // Common function to initialize network attributes from a ncclComm
 static void populateCommNetAttrs(struct ncclComm* comm, struct ncclConnector* conn, ncclNetAttr_t* netAttr) {
@@ -363,8 +406,17 @@ static ncclResult_t recvSetup(struct ncclComm* comm, struct ncclTopoGraph* graph
   req.tpRank = comm->topParentRanks[myInfo->rank];
   req.tpRemoteRank = comm->topParentRanks[peerInfo->rank];
   req.sameDevice = (comm->peerInfo[proxyRank].cudaDev == comm->cudaDev);
-  NCCLCHECK(ncclProxyCallBlocking(comm, &recv->proxyConn, ncclProxyMsgSetup, &req, sizeof(req), connectInfo, sizeof(ncclNetHandle_t)));
+  // Response includes: netHandle + fcControlAddr + hasFcControl
+  int recvSetupRespSize = sizeof(ncclNetHandle_t) + sizeof(union ncclSocketAddress) + sizeof(int);
+  char recvSetupResp[sizeof(ncclNetHandle_t) + sizeof(union ncclSocketAddress) + sizeof(int)];
+  NCCLCHECK(ncclProxyCallBlocking(comm, &recv->proxyConn, ncclProxyMsgSetup, &req, sizeof(req), recvSetupResp, recvSetupRespSize));
+  // Copy netHandle into connectInfo
+  memcpy(connectInfo, recvSetupResp, sizeof(ncclNetHandle_t));
   memcpy((uint8_t*)connectInfo + sizeof(ncclNetHandle_t), &req.useGdr, sizeof(int));
+  // Copy flow control address after useGdr
+  memcpy((uint8_t*)connectInfo + sizeof(ncclNetHandle_t) + sizeof(int),
+         recvSetupResp + sizeof(ncclNetHandle_t),
+         sizeof(union ncclSocketAddress) + sizeof(int));
   INFO(NCCL_INIT|NCCL_NET,"Channel %02d/%d : %d[%d] -> %d[%d] [receive] via NET/%s/%d%s%s%s", channelId, connIndex, peerInfo->rank, peerInfo->nvmlDev, myInfo->rank, myInfo->nvmlDev, comm->ncclNet->name, req.netDev,
       req.useGdr ? "/GDRDMA" : "", req.useGdr==ncclTopoGdrModePci ? "(PCI)" : "",
       req.shared ? "/Shared" : "");
@@ -412,6 +464,8 @@ static ncclResult_t netDumpMap(struct connectMap* map) {
 struct netSendConnectArgs {
   ncclNetHandle_t handle;
   ncclNetAttr_t netAttr;
+  union ncclSocketAddress fcControlAddr;  // Receiver's flow control listen address
+  int hasFcControl;                       // Whether flow control is available
 };
 
 struct netRecvConnectArgs {
@@ -436,6 +490,11 @@ static ncclResult_t sendConnect(struct ncclComm* comm, struct ncclConnect* conne
     INFO(NCCL_PROXY, "sendConnect ncclProxyCallAsync opId=%p", opId);
     netSendConnectArgs args = {0};
     memcpy(&args.handle, connectInfo, sizeof(ncclNetHandle_t));
+    // Extract flow control address from connectInfo (after netHandle + useGdr)
+    memcpy(&args.fcControlAddr, (uint8_t*)connectInfo + sizeof(ncclNetHandle_t) + sizeof(int),
+           sizeof(union ncclSocketAddress));
+    memcpy(&args.hasFcControl, (uint8_t*)connectInfo + sizeof(ncclNetHandle_t) + sizeof(int) + sizeof(union ncclSocketAddress),
+           sizeof(int));
 
     populateCommNetAttrs(comm, send, &args.netAttr);
 
@@ -792,8 +851,39 @@ static ncclResult_t recvProxySetup(struct ncclProxyConnection* connection, struc
     return ncclInternalError;
   }
 
-  if (respSize != sizeof(ncclNetHandle_t)) return ncclInternalError;
+  if (respSize != sizeof(ncclNetHandle_t) + sizeof(union ncclSocketAddress) + sizeof(int)) return ncclInternalError;
   NCCLCHECK(proxyState->ncclNet->listen(proxyState->netContext, req->netDev, respBuff, &resources->netListenComm));
+
+  // Create a TCP control listen socket for flow-control rate feedback.
+  // The address is returned alongside the netHandle so the sender can connect.
+  // Bind to the same interface the proxy listens on, with an OS-assigned port.
+  resources->hasControlSock = false;
+  union ncclSocketAddress controlAddr;
+  memset(&controlAddr, 0, sizeof(controlAddr));
+  int hasFcControl = 0;
+  ncclResult_t fcRet = ncclSuccess;
+  if (proxyState->listenSock != NULL) {
+    union ncclSocketAddress bindAddr;
+    fcRet = ncclSocketGetAddr(proxyState->listenSock, &bindAddr);
+    if (fcRet == ncclSuccess) {
+      (bindAddr.sa.sa_family == AF_INET ? bindAddr.sin.sin_port : bindAddr.sin6.sin6_port) = htons(0);
+      fcRet = ncclSocketInit(&resources->controlListenSock, &bindAddr, NCCL_SOCKET_MAGIC,
+                             ncclSocketTypeProxy, proxyState->abortFlag, 0);
+      if (fcRet == ncclSuccess) {
+        fcRet = ncclSocketListen(&resources->controlListenSock);
+        if (fcRet == ncclSuccess) {
+          fcRet = ncclSocketGetAddr(&resources->controlListenSock, &controlAddr);
+          if (fcRet == ncclSuccess) hasFcControl = 1;
+        }
+      }
+    }
+  }
+  // Write control address after the netHandle in the response buffer
+  memcpy((uint8_t*)respBuff + sizeof(ncclNetHandle_t), &controlAddr, sizeof(controlAddr));
+  memcpy((uint8_t*)respBuff + sizeof(ncclNetHandle_t) + sizeof(union ncclSocketAddress), &hasFcControl, sizeof(int));
+  if (hasFcControl) {
+    INFO(NCCL_NET, "FlowControl rank %d: control listen socket created for ch %d", resources->tpRank, resources->channelId);
+  }
   *done = 1;
 
   return ncclSuccess;
@@ -877,6 +967,29 @@ static ncclResult_t sendProxyConnect(struct ncclProxyConnection* connection, str
   }
   printNetAttrs(&req->netAttr, "send connect");
   *done = 1;
+
+  // Connect flow-control control socket to receiver
+  resources->fcState.hasControlSock = false;
+  memset(resources->fcState.flows, 0, sizeof(resources->fcState.flows));
+  if (req->hasFcControl) {
+    ncclResult_t fcRet = ncclSocketInit(&resources->fcState.controlSock, &req->fcControlAddr,
+                                        NCCL_SOCKET_MAGIC, ncclSocketTypeProxy, proxyState->abortFlag, 0);
+    if (fcRet == ncclSuccess) {
+      fcRet = ncclSocketConnect(&resources->fcState.controlSock);
+      if (fcRet == ncclSuccess) {
+        // Set non-blocking for poll in progress loop
+        int fd = -1;
+        ncclSocketGetFd(&resources->fcState.controlSock, &fd);
+        if (fd >= 0) {
+          int flags = fcntl(fd, F_GETFL, 0);
+          if (flags >= 0) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+        }
+        resources->fcState.hasControlSock = true;
+        INFO(NCCL_NET, "FlowControl sender rank %d: control socket connected to receiver rank %d ch %d",
+             resources->tpRank, resources->tpRemoteRank, resources->channelId);
+      }
+    }
+  }
 
   if (resources->netDeviceHandle) {
     connection->netDeviceHandle = resources->netDeviceHandle;
@@ -1052,6 +1165,29 @@ static ncclResult_t recvProxyConnect(struct ncclProxyConnection* connection, str
 
   NCCLCHECK(proxyState->ncclNet->closeListen(resources->netListenComm));
 
+  // Accept the flow-control control socket from sender.
+  // Init clears acceptSocketDescriptor to NCCL_INVALID_SOCKET so accept's
+  // memcpy-from-listenSock branch fires.
+  resources->hasControlSock = false;
+  {
+    ncclResult_t fcRet = ncclSocketInit(&resources->controlSock);
+    if (fcRet == ncclSuccess) fcRet = ncclSocketAccept(&resources->controlSock, &resources->controlListenSock);
+    if (fcRet == ncclSuccess) {
+      // Set non-blocking for sends in progress loop
+      int fd = -1;
+      ncclSocketGetFd(&resources->controlSock, &fd);
+      if (fd >= 0) {
+        int flags = fcntl(fd, F_GETFL, 0);
+        if (flags >= 0) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+      }
+      resources->hasControlSock = true;
+      INFO(NCCL_NET, "FlowControl recv rank %d: accepted control socket from sender rank %d ch %d",
+           resources->tpRank, resources->tpRemoteRank, resources->channelId);
+    }
+    // Close listen socket regardless — we only need one connection per channel
+    ncclSocketClose(&resources->controlListenSock);
+  }
+
   // Create structures
   struct connectMap* map = &resources->map;
   map->sameProcess = connection->sameProcess;
@@ -1191,6 +1327,11 @@ static ncclResult_t sendProxyFree(struct ncclProxyConnection* connection, struct
     }
   }
 
+  // Close flow control socket
+  if (resources && resources->fcState.hasControlSock) {
+    ncclSocketClose(&resources->fcState.controlSock);
+  }
+
   if (resources) free(resources);
   return ncclSuccess;
 }
@@ -1238,14 +1379,133 @@ static ncclResult_t recvProxyFree(struct ncclProxyConnection* connection, struct
     }
   }
 
+  // Close flow control socket
+  if (resources && resources->hasControlSock) {
+    ncclSocketClose(&resources->controlSock);
+  }
+
   if (resources) free(resources);
   return ncclSuccess;
 }
 
 static_assert(NCCL_STEPS <= NCCL_NET_MAX_REQUESTS, "Not enough net requests to cover for steps");
 
+// ─── Sender-side flow control: token bucket rate enforcement ───
+
+// Get monotonic time in seconds
+static inline double fcGetTimeSec() {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+}
+
+// Poll the control socket for rate update messages from the receiver.
+// Non-blocking: returns immediately if no messages are available.
+static void fcPollRateUpdates(struct ncclFcSenderState* state) {
+  if (!state->hasControlSock) return;
+  int fd = -1;
+  ncclSocketGetFd(&state->controlSock, &fd);
+  if (fd < 0) return;
+
+  // Read all available messages (there may be multiple queued up)
+  struct ncclFcRateMsg msg;
+  while (true) {
+    ssize_t ret = recv(fd, &msg, sizeof(msg), MSG_DONTWAIT);
+    if (ret != sizeof(msg)) break;
+    if (msg.magic != NCCL_FC_RATE_MSG_MAGIC) continue;
+
+    // Find or create the flow entry. A rate=0 message on an unknown flow is a
+    // tombstone (receiver completing a flow we already removed locally) and
+    // must be dropped — re-adding it would permanently throttle any future
+    // op reusing the same (channelId, opCount) key.
+    int freeSlot = -1;
+    bool found = false;
+    for (int i = 0; i < NCCL_FC_SENDER_MAX_FLOWS; i++) {
+      if (state->flows[i].active &&
+          state->flows[i].channelId == msg.channelId &&
+          state->flows[i].opCount == msg.opCount) {
+        if (msg.authorizedRate <= 0) {
+          state->flows[i].active = false;  // Receiver-side completion: drop entry
+        } else {
+          state->flows[i].bucket.rate = msg.authorizedRate;
+        }
+        found = true;
+        TRACE(NCCL_NET, "FlowControl sender: updated rate %.2f GB/s for ch %d op %lu",
+              msg.authorizedRate / (1024.0*1024.0*1024.0), msg.channelId, msg.opCount);
+        break;
+      }
+      if (!state->flows[i].active && freeSlot < 0) freeSlot = i;
+    }
+    if (!found && freeSlot >= 0 && msg.authorizedRate > 0) {
+      state->flows[freeSlot].active = true;
+      state->flows[freeSlot].channelId = msg.channelId;
+      state->flows[freeSlot].opCount = msg.opCount;
+      state->flows[freeSlot].bucket.rate = msg.authorizedRate;
+      state->flows[freeSlot].bucket.tokens = 0;
+      state->flows[freeSlot].bucket.burstSize = 0;  // Set when first used
+      state->flows[freeSlot].bucket.lastRefill = {0, 0};
+      state->flows[freeSlot].bucket.initialized = false;
+    }
+  }
+}
+
+// Check if the token bucket allows sending `bytes` for a given flow.
+// Returns true if allowed (tokens consumed), false if throttled.
+static bool fcTokenBucketAllow(struct ncclFcSenderState* state, int channelId, uint64_t opCount,
+                               int bytes, int stepSize) {
+  if (!state->hasControlSock) return true;  // No flow control
+
+  for (int i = 0; i < NCCL_FC_SENDER_MAX_FLOWS; i++) {
+    if (state->flows[i].active &&
+        state->flows[i].channelId == channelId &&
+        state->flows[i].opCount == opCount) {
+      struct ncclFcTokenBucket* b = &state->flows[i].bucket;
+
+      if (b->rate <= 0) return false;  // Flow is paused
+
+      if (!b->initialized) {
+        b->burstSize = (double)stepSize * 4;  // Allow burst of 4 steps
+        b->tokens = b->burstSize;  // Start with full bucket
+        b->lastRefill = {0, 0};
+        clock_gettime(CLOCK_MONOTONIC, &b->lastRefill);
+        b->initialized = true;
+      }
+
+      // Refill tokens based on elapsed time
+      struct timespec now;
+      clock_gettime(CLOCK_MONOTONIC, &now);
+      double elapsed = (double)(now.tv_sec - b->lastRefill.tv_sec) +
+                       (double)(now.tv_nsec - b->lastRefill.tv_nsec) * 1e-9;
+      b->tokens += b->rate * elapsed;
+      if (b->tokens > b->burstSize) b->tokens = b->burstSize;
+      b->lastRefill = now;
+
+      if (b->tokens >= (double)bytes) {
+        b->tokens -= (double)bytes;
+        return true;
+      }
+      return false;  // Not enough tokens — throttle
+    }
+  }
+  return true;  // Flow not found in FC table — no throttling
+}
+
+// Remove a flow from the sender state when the op completes
+static void fcSenderRemoveFlow(struct ncclFcSenderState* state, int channelId, uint64_t opCount) {
+  for (int i = 0; i < NCCL_FC_SENDER_MAX_FLOWS; i++) {
+    if (state->flows[i].active &&
+        state->flows[i].channelId == channelId &&
+        state->flows[i].opCount == opCount) {
+      state->flows[i].active = false;
+      break;
+    }
+  }
+}
+
 static ncclResult_t sendProxyProgress(struct ncclProxyState* proxyState, struct ncclProxyArgs* args) {
   int checkedNetAttr = 0;
+  // Only apply sender-side rate enforcement to P2P operations
+  bool useSendFc = (args->pattern == ncclPatternSend || args->pattern == ncclPatternRecv);
   if (args->state == ncclProxyOpReady) {
     for (int s=0; s<args->nsubs; s++) {
       struct ncclProxySubArgs* sub = args->subs+s;
@@ -1263,6 +1523,11 @@ static ncclResult_t sendProxyProgress(struct ncclProxyState* proxyState, struct 
   }
   args->idle = 1;
   if (args->state == ncclProxyOpProgress) {
+    // Poll for rate updates from receiver (non-blocking, P2P only)
+    if (useSendFc && args->nsubs > 0) {
+      struct sendNetResources* r0 = (struct sendNetResources*)(args->subs[0].connection->transportResources);
+      fcPollRateUpdates(&r0->fcState);
+    }
     int p = args->protocol;
     int maxDepth = std::min(NCCL_STEPS, NCCL_SHARED_STEPS/args->nsubs);
     for (int s=0; s<args->nsubs; s++) {
@@ -1341,6 +1606,13 @@ static ncclResult_t sendProxyProgress(struct ncclProxyState* proxyState, struct 
             }
           }
           if (ready) {
+            // Receiver-driven flow control: check token bucket before sending (P2P only)
+            if (useSendFc) {
+              if (!fcTokenBucketAllow(&resources->fcState, sub->channelId, args->opCount,
+                                     size > 0 ? size : stepSize, stepSize)) {
+                continue;  // Throttled — try again next iteration
+              }
+            }
             ncclProfilerRecordProxyStepEventState(s, args, transmittedStepId, ncclProfilerProxyStepSendPeerWait_v4);
             // Data is ready, try to send.
             // Coverity complains about the size here as pointing to an out-of-scope temporary.  Which is nonsense,
@@ -1383,6 +1655,10 @@ static ncclResult_t sendProxyProgress(struct ncclProxyState* proxyState, struct 
           args->idle = 0;
           if (sub->done == sub->nsteps) {
             args->done++;
+            // Clean up sender-side flow control state
+            if (useSendFc) {
+              fcSenderRemoveFlow(&resources->fcState, sub->channelId, args->opCount);
+            }
             if (sub->ringAlgo && sub->ringAlgo->decRefCount() == 0) delete sub->ringAlgo;
             sub->ringAlgo = NULL;
           }
@@ -1399,8 +1675,68 @@ static ncclResult_t sendProxyProgress(struct ncclProxyState* proxyState, struct 
   return ncclSuccess;
 }
 
+// ─── Receiver-driven flow control: rate feedback via control socket ───
+
+// Context passed to the flow control callback. Holds a map from senderRank to
+// control sockets so that rate updates can be dispatched to the correct sender.
+#define NCCL_FC_MAX_SENDERS 512
+
+struct ncclFcControlContext {
+  struct {
+    struct ncclSocket* sock;  // Pointer into recvNetResources::controlSock
+    int senderRank;
+    bool valid;
+  } senders[NCCL_FC_MAX_SENDERS];
+  int numSenders;
+};
+
+// Register a control socket for a sender rank (called once per connection setup)
+static void fcControlContextAddSender(struct ncclFcControlContext* ctx,
+                                      int senderRank, struct ncclSocket* sock) {
+  // Check for duplicate
+  for (int i = 0; i < ctx->numSenders; i++) {
+    if (ctx->senders[i].senderRank == senderRank && ctx->senders[i].valid) return;
+  }
+  if (ctx->numSenders < NCCL_FC_MAX_SENDERS) {
+    ctx->senders[ctx->numSenders].sock = sock;
+    ctx->senders[ctx->numSenders].senderRank = senderRank;
+    ctx->senders[ctx->numSenders].valid = true;
+    ctx->numSenders++;
+  }
+}
+
+// Flow control rate-change callback: send rate update to the appropriate sender
+// via its control socket. Called with flow control mutex held — must be non-blocking.
+static void fcRateChangeCallback(void* context, const struct ncclFcRateMsg* msg) {
+  struct ncclFcControlContext* ctx = (struct ncclFcControlContext*)context;
+  for (int i = 0; i < ctx->numSenders; i++) {
+    if (ctx->senders[i].valid && ctx->senders[i].senderRank == msg->senderRank) {
+      // Non-blocking send — if the socket buffer is full, the message is dropped.
+      // The sender will continue at the previously authorized rate until the next
+      // successful update. This is acceptable because rate changes are frequent
+      // (on every flow add/remove) and the sender will converge quickly.
+      int fd = -1;
+      ncclSocketGetFd(ctx->senders[i].sock, &fd);
+      if (fd >= 0) {
+        ssize_t ret = send(fd, msg, sizeof(*msg), MSG_NOSIGNAL | MSG_DONTWAIT);
+        if (ret == sizeof(*msg)) {
+          TRACE(NCCL_NET, "FlowControl: sent rate %.2f GB/s to sender %d ch %d op %lu",
+                msg->authorizedRate / (1024.0*1024.0*1024.0),
+                msg->senderRank, msg->channelId, msg->opCount);
+        }
+      }
+      return;
+    }
+  }
+}
+
 static ncclResult_t recvProxyProgress(struct ncclProxyState* proxyState, struct ncclProxyArgs* args) {
   int checkedNetAttr = 0;
+  // Only apply receiver-driven flow control to P2P operations (AlltoAll, Send/Recv).
+  // Collective patterns (Ring, Tree, etc.) require synchronized progress across all
+  // ranks — throttling any flow would stall the entire collective pipeline.
+  bool useFlowControl = proxyState->recvFlowControl &&
+      (args->pattern == ncclPatternSend || args->pattern == ncclPatternRecv);
   if (args->state == ncclProxyOpReady) {
     // Initialize subs and group them by same recvComm.
     void* recvComm;
@@ -1439,6 +1775,24 @@ static ncclResult_t recvProxyProgress(struct ncclProxyState* proxyState, struct 
       ncclProfilerRecordProxyOpEventState(s, args, ncclProfilerProxyOpInProgress_v4);
       if (!sub->reg)
         sub->recvMhandle = resources->mhandles[args->protocol];
+
+      // Register this flow with the receiver-driven flow control (P2P only)
+      if (useFlowControl) {
+        // Lazily initialize the control context and register control sockets
+        if (proxyState->fcControlContext == nullptr) {
+          proxyState->fcControlContext = calloc(1, sizeof(struct ncclFcControlContext));
+          ncclFlowControlSetCallback(proxyState->recvFlowControl,
+                                     fcRateChangeCallback, proxyState->fcControlContext);
+        }
+        if (resources->hasControlSock) {
+          fcControlContextAddSender((struct ncclFcControlContext*)proxyState->fcControlContext,
+                                   resources->tpRemoteRank, &resources->controlSock);
+        }
+        double rate;
+        ncclFlowControlAddFlow(proxyState->recvFlowControl,
+                               resources->tpRemoteRank, sub->channelId,
+                               args->opCount, sub->nbytes, &rate);
+      }
     }
     args->state = ncclProxyOpProgress;
   }
@@ -1458,6 +1812,8 @@ static ncclResult_t recvProxyProgress(struct ncclProxyState* proxyState, struct 
         struct ncclProxySubArgs* sub = subGroup + i;
         int postedStepId = sub->posted;
         if (sub->posted < sub->nsteps) {
+          // Rate-based flow control: the receiver posts irecv at full pipeline depth.
+          // Rate limiting is enforced on the sender side via token bucket.
           if (sub->posted >= sub->done + maxDepth) { subCount = 0; break; }
           ncclProfilerStartRecvProxyStepEvent(s+i, args, postedStepId);
           struct recvNetResources* resources = (struct recvNetResources*) (sub->connection->transportResources);
@@ -1549,6 +1905,12 @@ static ncclResult_t recvProxyProgress(struct ncclProxyState* proxyState, struct 
             connFifo[buffSlot].size = -1;
             sub->transSize = sizes[i];
             sub->received += args->sliceSteps;
+            // Report received bytes to flow control for progress tracking (P2P only)
+            if (useFlowControl && sizes[i] > 0) {
+              ncclFlowControlReportProgress(proxyState->recvFlowControl,
+                                            resources->tpRemoteRank, sub->channelId,
+                                            args->opCount, sizes[i]);
+            }
             ncclProfilerRecordProxyStepEventState(s+i, args, receivedStepId, ncclProfilerProxyStepRecvFlushWait);
             if (step < sub->nsteps) {
               struct recvNetResources* resources = (struct recvNetResources*) (sub->connection->transportResources);
@@ -1651,6 +2013,12 @@ static ncclResult_t recvProxyProgress(struct ncclProxyState* proxyState, struct 
             args->idle = 0;
             if (sub->done == sub->nsteps) {
               args->done++;
+              // Flow completed — remove from flow control and recalculate rates (P2P only)
+              if (useFlowControl) {
+                struct recvNetResources* fcRes = (struct recvNetResources*) (sub->connection->transportResources);
+                ncclFlowControlRemoveFlow(proxyState->recvFlowControl,
+                                          fcRes->tpRemoteRank, sub->channelId, args->opCount);
+              }
               if (sub->ringAlgo && sub->ringAlgo->decRefCount() == 0) delete sub->ringAlgo;
               sub->ringAlgo = NULL;
               break;
