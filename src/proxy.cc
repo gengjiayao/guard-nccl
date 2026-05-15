@@ -18,6 +18,8 @@
 #include "compiler.h"
 #include "os.h"
 #include "flowcontrol.h"
+#include "graph.h"
+#include "graph/topo.h"
 
 #include <assert.h>
 #include <algorithm>
@@ -1965,11 +1967,42 @@ ncclResult_t ncclProxyCreate(struct ncclComm* comm) {
     proxyState->directMode = comm->directMode;
     memcpy(proxyState->buffSizes, comm->buffSizes, sizeof(comm->buffSizes));
 
-    // Initialize receiver-driven flow control
+    // Initialize receiver-driven flow control.
+    // Bandwidth is auto-discovered from NIC link speed during recvProxySetup
+    // (see ncclFlowControlRegisterNic in transport/net.cc). The fallback value
+    // is only used for the brief window before the first NIC registers, or if
+    // getProperties() returns a bogus speed. NCCL_RECV_FC_BW_GBS still overrides.
     proxyState->recvFlowControl = new ncclRecvFlowControl{};
-    // Default 25 GB/s (~200 Gbps), overridable via NCCL_RECV_FC_BW_GBS env var
-    double defaultBw = 25.0 * 1024.0 * 1024.0 * 1024.0;
-    NCCLCHECK(ncclFlowControlInit(proxyState->recvFlowControl, proxyState->tpRank, defaultBw));
+    double fallbackBw = 25.0 * 1024.0 * 1024.0 * 1024.0;  // 25 GB/s = ~200 Gbps
+    NCCLCHECK(ncclFlowControlInit(proxyState->recvFlowControl, proxyState->tpRank, fallbackBw));
+
+    // Pre-compute netDev → local-rank-share table from topology. A NIC physically
+    // shared by N local ranks contributes only its 1/N share of capacity to this
+    // rank's aggregate receive bandwidth. Looked up at proxySetup time below.
+    proxyState->fcNicShareCount = 0;
+    for (int i = 0; i < NCCL_FC_NIC_SHARE_MAX; i++) {
+      proxyState->fcNicShareDev[i] = -1;
+      proxyState->fcNicShareRanks[i] = 1;
+    }
+    if (comm->topo != nullptr) {
+      struct ncclTopoSystem* topo = comm->topo;
+      int nNetNodes = topo->nodes[NET].count;
+      for (int n = 0; n < nNetNodes && proxyState->fcNicShareCount < NCCL_FC_NIC_SHARE_MAX; n++) {
+        int dev = topo->nodes[NET].nodes[n].net.dev;
+        if (dev < 0) continue;
+        int localGpus[NCCL_TOPO_MAX_NODES];
+        int localGpuCount = 0;
+        if (ncclTopoGetLocal(topo, NET, n, GPU, localGpus, &localGpuCount, NULL) != ncclSuccess) {
+          continue;
+        }
+        int share = localGpuCount > 0 ? localGpuCount : 1;
+        int slot = proxyState->fcNicShareCount++;
+        proxyState->fcNicShareDev[slot] = dev;
+        proxyState->fcNicShareRanks[slot] = share;
+        INFO(NCCL_NET, "FlowControl rank %d: NIC dev=%d shared by %d local rank(s) on host",
+             proxyState->tpRank, dev, share);
+      }
+    }
     // The callback is set later by net.cc when control sockets are established
     proxyState->fcControlContext = nullptr;
 

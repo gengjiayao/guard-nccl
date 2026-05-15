@@ -12,8 +12,10 @@
 #include <climits>
 #include <time.h>
 
-// Environment variables
-NCCL_PARAM(RecvFlowControlBandwidthGBs, "RECV_FC_BW_GBS", 25);
+// Environment variables.
+// Default -1 means "auto-discover from NIC link speed". A positive value
+// (e.g. NCCL_RECV_FC_BW_GBS=50) forces that value and disables NIC autodiscovery.
+NCCL_PARAM(RecvFlowControlBandwidthGBs, "RECV_FC_BW_GBS", -1);
 NCCL_PARAM(RecvFlowControlMaxConcurrent, "RECV_FC_MAX_CONCURRENT", 0);
 NCCL_PARAM(RecvFlowControlQuotaMB, "RECV_FC_QUOTA_MB", 4);
 // Guard-style admission threshold: flows with totalBytes ≤ this skip fair-share
@@ -167,7 +169,7 @@ static void demoteActiveFlow(struct ncclRecvFlowControl* fc, int idx) {
   promotePending(fc);
 }
 
-ncclResult_t ncclFlowControlInit(struct ncclRecvFlowControl* fc, int tpRank, double totalRecvBandwidth) {
+ncclResult_t ncclFlowControlInit(struct ncclRecvFlowControl* fc, int tpRank, double fallbackBandwidth) {
   memset(fc->flows, 0, sizeof(fc->flows));
   fc->numActive = 0;
   fc->numPending = 0;
@@ -175,12 +177,20 @@ ncclResult_t ncclFlowControlInit(struct ncclRecvFlowControl* fc, int tpRank, dou
   fc->nextArrivalOrder = 0;
   fc->rateChangeCallback = nullptr;
   fc->rateChangeContext = nullptr;
+  fc->numNics = 0;
+  memset(fc->nicDev, 0, sizeof(fc->nicDev));
+  memset(fc->nicBw, 0, sizeof(fc->nicBw));
 
   int64_t bwGBs = ncclParamRecvFlowControlBandwidthGBs();
   if (bwGBs > 0) {
+    // Env override: lock totalRecvBandwidth and ignore NIC reports.
     fc->totalRecvBandwidth = (double)bwGBs * 1024.0 * 1024.0 * 1024.0;
+    fc->bwFromEnv = 1;
   } else {
-    fc->totalRecvBandwidth = totalRecvBandwidth;
+    // Auto-discovery: leave totalRecvBandwidth at the fallback. It will be
+    // overwritten the first time a NIC registers via ncclFlowControlRegisterNic.
+    fc->totalRecvBandwidth = fallbackBandwidth;
+    fc->bwFromEnv = 0;
   }
 
   int64_t userMaxConcurrent = ncclParamRecvFlowControlMaxConcurrent();
@@ -194,13 +204,62 @@ ncclResult_t ncclFlowControlInit(struct ncclRecvFlowControl* fc, int tpRank, dou
   int64_t rttUs = ncclParamRecvFlowControlBaseRttUs();
   fc->baseRttSec = (rttUs > 0 ? (double)rttUs : 22.0) * 1e-6;
 
-  INFO(NCCL_NET, "FlowControl rank %d: initialized, bw=%.2f GB/s, maxConcurrent=%d%s, quota=%ldMB%s, bdp=%ldB%s, proactive=%d (baseRtt=%.1fus)",
+  INFO(NCCL_NET, "FlowControl rank %d: initialized, bw=%.2f GB/s (%s), maxConcurrent=%d%s, quota=%ldMB%s, bdp=%ldB%s, proactive=%d (baseRtt=%.1fus)",
        tpRank, fc->totalRecvBandwidth / (1024.0 * 1024.0 * 1024.0),
+       fc->bwFromEnv ? "env override" : "auto/fallback, awaiting NIC discovery",
        fc->maxConcurrent, fc->maxConcurrent == 0 ? " (unlimited)" : "",
        (long)(fc->quotaPerRound / (1024 * 1024)),
        fc->quotaPerRound > 0 ? " (DRR)" : "",
        (long)fc->bdpBytes, fc->bdpBytes > 0 ? " (bypass)" : " (no bypass)",
        fc->proactiveRelease, fc->baseRttSec * 1e6);
+  return ncclSuccess;
+}
+
+ncclResult_t ncclFlowControlRegisterNic(struct ncclRecvFlowControl* fc,
+                                        int netDev, int speedMbps, int rankShare) {
+  if (fc == nullptr || speedMbps <= 0) return ncclSuccess;
+  if (rankShare < 1) rankShare = 1;
+  std::lock_guard<std::mutex> lock(fc->mutex);
+
+  // Env override wins — don't let auto-discovery touch totalRecvBandwidth.
+  if (fc->bwFromEnv) return ncclSuccess;
+
+  // Dedup: this netDev may be referenced by many channels/peers.
+  for (int i = 0; i < fc->numNics; i++) {
+    if (fc->nicDev[i] == netDev) return ncclSuccess;
+  }
+  if (fc->numNics >= NCCL_FC_MAX_NICS) {
+    WARN("FlowControl rank %d: NIC table full (%d entries), ignoring netDev %d",
+         fc->tpRank, NCCL_FC_MAX_NICS, netDev);
+    return ncclSuccess;
+  }
+
+  // Convert Mbps → bytes/sec. Use SI (1e6) since NIC link speeds are quoted in
+  // base-10 (100GbE = 100e9 bps, 200GbE = 200e9 bps, 400GbE = 400e9 bps).
+  // Divide by rankShare so a NIC shared by N local ranks contributes 1/N of its
+  // capacity to this rank — sums across local ranks then equal the physical NIC BW.
+  double linkBytesPerSec = (double)speedMbps * 1.0e6 / 8.0;
+  double shareBytesPerSec = linkBytesPerSec / (double)rankShare;
+  int slot = fc->numNics++;
+  fc->nicDev[slot] = netDev;
+  fc->nicBw[slot] = shareBytesPerSec;
+
+  // Sum across all registered NICs — this rank's aggregate receive capacity when
+  // multiple NICs run concurrent flows.
+  double sum = 0;
+  for (int i = 0; i < fc->numNics; i++) sum += fc->nicBw[i];
+  double oldBw = fc->totalRecvBandwidth;
+  fc->totalRecvBandwidth = sum;
+
+  INFO(NCCL_NET, "FlowControl rank %d: registered NIC dev=%d link=%d Mbps (%.2f GB/s), "
+       "shared by %d rank(s) → claim %.2f GB/s, aggregate=%.2f GB/s across %d NIC(s)%s",
+       fc->tpRank, netDev, speedMbps, linkBytesPerSec / (1024.0*1024.0*1024.0),
+       rankShare, shareBytesPerSec / (1024.0*1024.0*1024.0),
+       sum / (1024.0*1024.0*1024.0), fc->numNics,
+       oldBw > 0 && fc->numActive > 0 ? " — re-authorizing active flows" : "");
+
+  // If flows are already active, recompute their fair share with the new total.
+  if (fc->numActive > 0) recalculateAndNotify(fc);
   return ncclSuccess;
 }
 

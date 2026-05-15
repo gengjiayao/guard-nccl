@@ -380,6 +380,16 @@ struct ncclProxyState {
   // Receiver-driven flow control
   struct ncclRecvFlowControl* recvFlowControl;
   void* fcControlContext;  // ncclFcControlContext*, opaque to avoid header dependency
+
+  // Pre-computed netDev → number of local ranks sharing that NIC, captured at
+  // proxy init from comm->topo. Used to scale each NIC's link speed by 1/N
+  // before feeding it into receiver flow control, so a NIC shared by N ranks
+  // contributes only its per-rank share to this rank's aggregate receive BW.
+  // Stored as a parallel-array map: netDev[i] → share[i]. -1 share = unknown.
+#define NCCL_FC_NIC_SHARE_MAX 64
+  int fcNicShareCount;
+  int fcNicShareDev[NCCL_FC_NIC_SHARE_MAX];
+  int fcNicShareRanks[NCCL_FC_NIC_SHARE_MAX];
 };
 
 enum proxyConnectState {

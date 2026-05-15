@@ -812,6 +812,16 @@ static ncclResult_t sendProxySetup(struct ncclProxyConnection* connection, struc
     return ncclInternalError;
   }
 
+  // Feed this NIC's link speed into receiver flow control for auto bw discovery.
+  // Send-side setup is included because a rank is typically both sender and
+  // receiver over the same NIC set; registering on either path ensures coverage.
+  // Look up local-rank share factor pre-computed at proxy init from topology.
+  int fcShare = 1;
+  for (int i = 0; i < proxyState->fcNicShareCount; i++) {
+    if (proxyState->fcNicShareDev[i] == req->netDev) { fcShare = proxyState->fcNicShareRanks[i]; break; }
+  }
+  ncclFlowControlRegisterNic(proxyState->recvFlowControl, req->netDev, props.speed, fcShare);
+
   // We don't return any data
   if (respSize != 0) return ncclInternalError;
   *done = 1;
@@ -850,6 +860,15 @@ static ncclResult_t recvProxySetup(struct ncclProxyConnection* connection, struc
       [allowed range: %ld - %ld] \n", resources->maxP2pBytes, 0L, NCCL_MAX_NET_SIZE_BYTES);
     return ncclInternalError;
   }
+
+  // Feed this NIC's link speed into receiver flow control for auto bw discovery.
+  // Idempotent per netDev id, so re-registering across channels/peers is safe.
+  // Local-rank share factor was pre-computed from topology at proxy init.
+  int fcShare = 1;
+  for (int i = 0; i < proxyState->fcNicShareCount; i++) {
+    if (proxyState->fcNicShareDev[i] == req->netDev) { fcShare = proxyState->fcNicShareRanks[i]; break; }
+  }
+  ncclFlowControlRegisterNic(proxyState->recvFlowControl, req->netDev, props.speed, fcShare);
 
   if (respSize != sizeof(ncclNetHandle_t) + sizeof(union ncclSocketAddress) + sizeof(int)) return ncclInternalError;
   NCCLCHECK(proxyState->ncclNet->listen(proxyState->netContext, req->netDev, respBuff, &resources->netListenComm));

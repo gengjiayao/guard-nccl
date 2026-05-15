@@ -41,6 +41,11 @@
 // Maximum number of registered flows per receiver
 #define NCCL_FC_MAX_FLOWS 512
 
+// Maximum number of unique NICs this rank can register receive capacity for.
+// Used to derive totalRecvBandwidth from real NIC link speeds rather than a
+// hardcoded constant. 16 is well above typical per-host NIC counts.
+#define NCCL_FC_MAX_NICS 16
+
 // Rate update message sent from receiver proxy to sender proxy via control socket
 struct ncclFcRateMsg {
   uint32_t magic;           // NCCL_FC_RATE_MSG_MAGIC
@@ -102,6 +107,14 @@ struct ncclRecvFlowControl {
   int tpRank;
   uint64_t nextArrivalOrder;
 
+  // Auto NIC-capacity discovery. When the env var override is not set, totalRecvBandwidth
+  // starts at 0 and is filled in incrementally as recvProxySetup reports each NIC's link
+  // speed via ncclFlowControlRegisterNic. Each unique netDev id contributes once.
+  int     bwFromEnv;                 // 1 if NCCL_RECV_FC_BW_GBS overrode auto-discovery
+  int     numNics;                   // Count of NICs registered so far
+  int     nicDev[NCCL_FC_MAX_NICS];  // Unique netDev ids registered
+  double  nicBw[NCCL_FC_MAX_NICS];   // Per-NIC bandwidth in bytes/sec
+
   // Guard-style admission threshold + proactive release config
   ssize_t bdpBytes;          // Flows with totalBytes ≤ bdpBytes bypass fair-share (0 = disable)
   int     proactiveRelease;  // 1 = enable EWMA-based early release, 0 = disable
@@ -114,9 +127,19 @@ struct ncclRecvFlowControl {
   std::mutex mutex;
 };
 
-// Initialize flow control.
+// Initialize flow control. `fallbackBandwidth` (bytes/sec) is used if neither the
+// env override nor NIC autodiscovery yields a value (e.g., no NIC has registered yet).
 ncclResult_t ncclFlowControlInit(struct ncclRecvFlowControl* fc, int tpRank,
-                                 double totalRecvBandwidth);
+                                 double fallbackBandwidth);
+
+// Register a NIC's link speed for auto bandwidth discovery. Idempotent per netDev id —
+// repeated calls with the same id are no-ops. Recalculates rates if a new NIC is added.
+// `speedMbps` is the link speed in Mbps as reported by ncclNetProperties.speed.
+// `rankShare` is the number of local ranks that share this physical NIC; the recorded
+// per-NIC bandwidth is divided by `rankShare` so this rank only claims its 1/N share.
+// Pass 1 if the NIC is not shared. Has no effect when NCCL_RECV_FC_BW_GBS overrides.
+ncclResult_t ncclFlowControlRegisterNic(struct ncclRecvFlowControl* fc,
+                                        int netDev, int speedMbps, int rankShare);
 
 // Set the callback invoked on rate changes.
 void ncclFlowControlSetCallback(struct ncclRecvFlowControl* fc,
