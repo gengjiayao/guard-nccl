@@ -1,0 +1,9 @@
+# MPI hostfile for bench-fc-alltoall.sh
+# One line per node: "<hostname> slots=<gpus-per-node>"
+# Lines starting with # and blank lines are ignored.
+#
+# 4-node × 8-GPU example:
+node-001 slots=8
+node-002 slots=8
+node-003 slots=8
+node-004 slots=8

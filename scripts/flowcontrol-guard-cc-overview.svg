@@ -1,0 +1,559 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 2520"
+     font-family="-apple-system, 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif">
+  <defs>
+    <marker id="arr"  viewBox="0 0 10 10" refX="9" refY="3" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M0,0 L0,6 L9,3 z" fill="#333"/>
+    </marker>
+    <marker id="arrG" viewBox="0 0 10 10" refX="9" refY="3" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M0,0 L0,6 L9,3 z" fill="#2a8055"/>
+    </marker>
+    <marker id="arrB" viewBox="0 0 10 10" refX="9" refY="3" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M0,0 L0,6 L9,3 z" fill="#1a5fb4"/>
+    </marker>
+    <marker id="arrP" viewBox="0 0 10 10" refX="9" refY="3" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M0,0 L0,6 L9,3 z" fill="#7239ea"/>
+    </marker>
+    <marker id="arrO" viewBox="0 0 10 10" refX="9" refY="3" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M0,0 L0,6 L9,3 z" fill="#e8730c"/>
+    </marker>
+    <marker id="arrR" viewBox="0 0 10 10" refX="9" refY="3" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M0,0 L0,6 L9,3 z" fill="#c01c28"/>
+    </marker>
+  </defs>
+
+  <rect width="1400" height="2520" fill="#fafafa"/>
+
+  <!-- ============ Title + Legend ============ -->
+  <text x="700" y="38" text-anchor="middle" font-size="26" font-weight="700" fill="#1a1a1a">
+    flowcontrol-guard-cc 完整能力总览
+  </text>
+  <text x="700" y="62" text-anchor="middle" font-size="13" fill="#555">
+    NCCL P2P 接收端驱动的速率控制 · 仅作用于 Send / Recv / AlltoAll · 集合通信完全不受影响
+  </text>
+
+  <g transform="translate(60, 82)" font-size="11">
+    <text x="0" y="11" font-weight="700" fill="#444">图例:</text>
+    <rect x="46"  y="0" width="14" height="14" fill="#d1e7dd" stroke="#2a8055"/>
+    <text x="64"  y="11" fill="#222">本次新增 (NIC 容量自适应 + 多-rank 共享)</text>
+    <rect x="296" y="0" width="14" height="14" fill="#cfe2ff" stroke="#1a5fb4"/>
+    <text x="314" y="11" fill="#222">原有 (Receiver-driven fair-share 核心)</text>
+    <rect x="548" y="0" width="14" height="14" fill="#e7daff" stroke="#7239ea"/>
+    <text x="566" y="11" fill="#222">原有 (Guard 风格扩展, opt-in)</text>
+    <rect x="744" y="0" width="14" height="14" fill="#ffe5cc" stroke="#e8730c"/>
+    <text x="762" y="11" fill="#222">发送端 enforcement</text>
+    <rect x="888" y="0" width="14" height="14" fill="#f8d7da" stroke="#c01c28"/>
+    <text x="906" y="11" fill="#222">P2P-only / 集合通信豁免</text>
+  </g>
+
+  <!-- ============================================================ -->
+  <!-- ①  NIC 容量自动发现 + 多 rank 共享 (本次新增)                -->
+  <!-- ============================================================ -->
+  <g transform="translate(40, 120)">
+    <rect width="1320" height="500" rx="8" fill="#d1e7dd" stroke="#2a8055" stroke-width="2"/>
+    <text x="20" y="28" font-size="17" font-weight="700" fill="#1c4a32">
+      ① NIC 容量自动发现 + 多 rank 共享处理 &#160;&#160;(本次新增)
+    </text>
+    <text x="20" y="48" font-size="12" fill="#2a5040">
+      旧实现硬编码 25 GB/s；现在从 NIC 实际链路速率 + 拓扑共享数推出每 rank 的真实接收容量
+    </text>
+
+    <!-- Topology examples -->
+    <g transform="translate(20, 70)">
+      <!-- Host A: 4 GPU / 2 NIC (share=2) -->
+      <rect x="0" y="0" width="430" height="270" rx="6" fill="#ffffff" stroke="#7aa890"/>
+      <text x="215" y="22" text-anchor="middle" font-size="13" font-weight="700" fill="#1c4a32">
+        场景 A: Host = 4 GPU + 2 NIC  (NIC 共享比 2:1)
+      </text>
+
+      <!-- GPUs -->
+      <g font-size="11">
+        <rect x="20"  y="38" width="80" height="40" rx="3" fill="#eef6ff" stroke="#1a5fb4"/>
+        <text x="60"  y="62" text-anchor="middle">GPU 0</text>
+        <rect x="115" y="38" width="80" height="40" rx="3" fill="#eef6ff" stroke="#1a5fb4"/>
+        <text x="155" y="62" text-anchor="middle">GPU 1</text>
+        <rect x="225" y="38" width="80" height="40" rx="3" fill="#eef6ff" stroke="#1a5fb4"/>
+        <text x="265" y="62" text-anchor="middle">GPU 2</text>
+        <rect x="320" y="38" width="80" height="40" rx="3" fill="#eef6ff" stroke="#1a5fb4"/>
+        <text x="360" y="62" text-anchor="middle">GPU 3</text>
+      </g>
+      <!-- NICs -->
+      <g font-size="11">
+        <rect x="60"  y="120" width="120" height="46" rx="4" fill="#ffe5cc" stroke="#e8730c"/>
+        <text x="120" y="139" text-anchor="middle" font-weight="700">NIC dev=0</text>
+        <text x="120" y="158" text-anchor="middle" fill="#7a4513">200 Gbps · 25 GB/s</text>
+        <rect x="240" y="120" width="120" height="46" rx="4" fill="#ffe5cc" stroke="#e8730c"/>
+        <text x="300" y="139" text-anchor="middle" font-weight="700">NIC dev=1</text>
+        <text x="300" y="158" text-anchor="middle" fill="#7a4513">200 Gbps · 25 GB/s</text>
+      </g>
+      <!-- edges -->
+      <line x1="60"  y1="78" x2="100" y2="120" stroke="#888" stroke-width="1"/>
+      <line x1="155" y1="78" x2="130" y2="120" stroke="#888" stroke-width="1"/>
+      <line x1="265" y1="78" x2="280" y2="120" stroke="#888" stroke-width="1"/>
+      <line x1="360" y1="78" x2="320" y2="120" stroke="#888" stroke-width="1"/>
+
+      <!-- per-rank share -->
+      <g font-size="11" transform="translate(20, 185)">
+        <text x="0" y="0" font-weight="700" fill="#1c4a32">ncclTopoGetLocal(NET → GPU):</text>
+        <text x="0" y="18" fill="#222">  dev0 → {GPU0, GPU1}  ⇒  share = 2</text>
+        <text x="0" y="34" fill="#222">  dev1 → {GPU2, GPU3}  ⇒  share = 2</text>
+        <text x="0" y="56" font-weight="700" fill="#2a8055">
+          每个 rank 的 totalRecvBw = 25 / 2 = 12.5 GB/s
+        </text>
+        <text x="0" y="72" fill="#444">  (4 个 rank 加起来 = 50 GB/s = 2 张 NIC 实际线速, 不过授权)</text>
+      </g>
+    </g>
+
+    <!-- Host B: 4 GPU / 4 NIC (share=1) -->
+    <g transform="translate(470, 70)">
+      <rect x="0" y="0" width="430" height="270" rx="6" fill="#ffffff" stroke="#7aa890"/>
+      <text x="215" y="22" text-anchor="middle" font-size="13" font-weight="700" fill="#1c4a32">
+        场景 B: Host = 4 GPU + 4 NIC  (1:1, 不共享)
+      </text>
+      <g font-size="11">
+        <rect x="20"  y="38" width="80" height="40" rx="3" fill="#eef6ff" stroke="#1a5fb4"/>
+        <text x="60"  y="62" text-anchor="middle">GPU 0</text>
+        <rect x="115" y="38" width="80" height="40" rx="3" fill="#eef6ff" stroke="#1a5fb4"/>
+        <text x="155" y="62" text-anchor="middle">GPU 1</text>
+        <rect x="225" y="38" width="80" height="40" rx="3" fill="#eef6ff" stroke="#1a5fb4"/>
+        <text x="265" y="62" text-anchor="middle">GPU 2</text>
+        <rect x="320" y="38" width="80" height="40" rx="3" fill="#eef6ff" stroke="#1a5fb4"/>
+        <text x="360" y="62" text-anchor="middle">GPU 3</text>
+      </g>
+      <g font-size="11">
+        <rect x="15"  y="120" width="90" height="46" rx="4" fill="#ffe5cc" stroke="#e8730c"/>
+        <text x="60"  y="139" text-anchor="middle" font-weight="700">dev=0</text>
+        <text x="60"  y="158" text-anchor="middle" fill="#7a4513">400 Gbps</text>
+        <rect x="110" y="120" width="90" height="46" rx="4" fill="#ffe5cc" stroke="#e8730c"/>
+        <text x="155" y="139" text-anchor="middle" font-weight="700">dev=1</text>
+        <text x="155" y="158" text-anchor="middle" fill="#7a4513">400 Gbps</text>
+        <rect x="220" y="120" width="90" height="46" rx="4" fill="#ffe5cc" stroke="#e8730c"/>
+        <text x="265" y="139" text-anchor="middle" font-weight="700">dev=2</text>
+        <text x="265" y="158" text-anchor="middle" fill="#7a4513">400 Gbps</text>
+        <rect x="315" y="120" width="90" height="46" rx="4" fill="#ffe5cc" stroke="#e8730c"/>
+        <text x="360" y="139" text-anchor="middle" font-weight="700">dev=3</text>
+        <text x="360" y="158" text-anchor="middle" fill="#7a4513">400 Gbps</text>
+      </g>
+      <line x1="60"  y1="78" x2="60"  y2="120" stroke="#888"/>
+      <line x1="155" y1="78" x2="155" y2="120" stroke="#888"/>
+      <line x1="265" y1="78" x2="265" y2="120" stroke="#888"/>
+      <line x1="360" y1="78" x2="360" y2="120" stroke="#888"/>
+
+      <g font-size="11" transform="translate(20, 185)">
+        <text x="0" y="0" font-weight="700" fill="#1c4a32">ncclTopoGetLocal(NET → GPU):</text>
+        <text x="0" y="18" fill="#222">  每张 NIC → 1 个 GPU  ⇒  share = 1</text>
+        <text x="0" y="40" font-weight="700" fill="#2a8055">
+          每个 rank 的 totalRecvBw = 50 GB/s (单卡线速)
+        </text>
+        <text x="0" y="58" fill="#444">  Σ(speedᵢ/shareᵢ) 在 multi-rail 多 NIC 场景下自动累加</text>
+      </g>
+    </g>
+
+    <!-- Right column: pipeline -->
+    <g transform="translate(920, 70)">
+      <rect x="0" y="0" width="380" height="270" rx="6" fill="#ffffff" stroke="#7aa890"/>
+      <text x="190" y="22" text-anchor="middle" font-size="13" font-weight="700" fill="#1c4a32">
+        发现流水线 (proxy 启动到 setup)
+      </text>
+
+      <g font-size="11" transform="translate(20, 42)">
+        <!-- step 1 -->
+        <rect x="0" y="0" width="340" height="38" rx="3" fill="#eaf5ee" stroke="#2a8055"/>
+        <text x="8" y="15" font-weight="700" fill="#1c4a32">1. proxy 启动 (proxy.cc)</text>
+        <text x="8" y="30" fill="#333">遍历 comm-&gt;topo NET 节点, 填 fcNicShareDev/Ranks[]</text>
+
+        <!-- step 2 -->
+        <rect x="0" y="50" width="340" height="38" rx="3" fill="#eaf5ee" stroke="#2a8055"/>
+        <text x="8" y="65" font-weight="700" fill="#1c4a32">2. ncclFlowControlInit</text>
+        <text x="8" y="80" fill="#333">env NCCL_RECV_FC_BW_GBS &gt; 0 ⇒ 锁死 (override)</text>
+
+        <!-- step 3 -->
+        <rect x="0" y="100" width="340" height="50" rx="3" fill="#eaf5ee" stroke="#2a8055"/>
+        <text x="8" y="115" font-weight="700" fill="#1c4a32">3. recv/sendProxySetup (per connection)</text>
+        <text x="8" y="130" fill="#333">getProperties(netDev) → props.speed (Mbps)</text>
+        <text x="8" y="144" fill="#333">查 fcNicShareDev[] 得到 share</text>
+
+        <!-- step 4 -->
+        <rect x="0" y="162" width="340" height="50" rx="3" fill="#d1e7dd" stroke="#2a8055" stroke-width="2"/>
+        <text x="8" y="178" font-weight="700" fill="#1c4a32">4. ncclFlowControlRegisterNic</text>
+        <text x="8" y="193" fill="#222">nicBw[i] = speed×1e6/8 / share  (按 netDev 去重)</text>
+        <text x="8" y="207" font-weight="700" fill="#2a8055">totalRecvBw = Σ nicBw[i]  (活跃流自动 re-auth)</text>
+      </g>
+    </g>
+
+    <!-- Note -->
+    <g transform="translate(20, 360)" font-size="12">
+      <rect x="0" y="0" width="1280" height="125" rx="4" fill="#ffffff" stroke="#a0c6b0" stroke-dasharray="3 3"/>
+      <text x="12" y="20" font-weight="700" fill="#1c4a32">关键点</text>
+      <text x="12" y="40" fill="#333">
+        • <tspan font-weight="700">单位修正:</tspan> 旧实现用 1024 进制（25 GiB/s 比 200 GbE 真实速率虚高 ~7%）；现在用 SI 10⁶（200 Gbps = 23.28 GB/s, 与铭牌一致）
+      </text>
+      <text x="12" y="58" fill="#333">
+        • <tspan font-weight="700">幂等 + 增量:</tspan> 同一 netDev 在多 channel / 多 peer 的 setup 中只算一次；新 NIC 注册时若已有 ACTIVE 流, 自动 recalculateAndNotify 重发授权
+      </text>
+      <text x="12" y="76" fill="#333">
+        • <tspan font-weight="700">共享一致性:</tspan> N 个本地 rank 走的同一份拓扑 → 算出同一 share, 把同一物理 NIC 的容量瓜分干净, 全 host 加总 ≤ 线速, 不会 oversubscribe
+      </text>
+      <text x="12" y="94" fill="#333">
+        • <tspan font-weight="700">fallback:</tspan> 第一个 NIC 注册之前 (proxy 已启动但还没建任何连接), totalRecvBw = 25 GB/s 兜底, 不影响正确性
+      </text>
+      <text x="12" y="112" fill="#333">
+        • <tspan font-weight="700">override:</tspan> NCCL_RECV_FC_BW_GBS=&lt;n&gt; 仍可强制覆盖, 自适应静默关闭 — 用于调参 / sweep / 异构链路验证
+      </text>
+    </g>
+  </g>
+
+  <!-- ============================================================ -->
+  <!-- ②  接收端 flow 状态机 + 公平份额 (原有)                       -->
+  <!-- ============================================================ -->
+  <g transform="translate(40, 640)">
+    <rect width="1320" height="420" rx="8" fill="#cfe2ff" stroke="#1a5fb4" stroke-width="2"/>
+    <text x="20" y="28" font-size="17" font-weight="700" fill="#0a3578">
+      ② 接收端 flow 生命周期 + 公平份额分配 &#160;&#160;(原有, Receiver-driven 核心 + Guard 扩展)
+    </text>
+    <text x="20" y="48" font-size="12" fill="#1a3a5c">
+      flows[] 表上限 NCCL_FC_MAX_FLOWS=512 · 每次 Add/Remove/Release 触发一次速率重算
+    </text>
+
+    <!-- State machine -->
+    <g transform="translate(40, 80)">
+      <!-- FREE -->
+      <rect x="0" y="120" width="110" height="50" rx="6" fill="#ffffff" stroke="#6c757d"/>
+      <text x="55" y="150" text-anchor="middle" font-size="13" font-weight="700">FREE</text>
+
+      <!-- PENDING -->
+      <rect x="200" y="60" width="120" height="60" rx="6" fill="#fff3cd" stroke="#b08000"/>
+      <text x="260" y="84" text-anchor="middle" font-size="13" font-weight="700">PENDING</text>
+      <text x="260" y="102" text-anchor="middle" font-size="10">rate = 0</text>
+      <text x="260" y="115" text-anchor="middle" font-size="10">waiting for slot</text>
+
+      <!-- ACTIVE -->
+      <rect x="400" y="60" width="120" height="60" rx="6" fill="#cfe2ff" stroke="#1a5fb4" stroke-width="2"/>
+      <text x="460" y="84" text-anchor="middle" font-size="13" font-weight="700" fill="#0a3578">ACTIVE</text>
+      <text x="460" y="102" text-anchor="middle" font-size="10">in 分母</text>
+      <text x="460" y="115" text-anchor="middle" font-size="10">rate = BW / numActive</text>
+
+      <!-- OFFLOAD -->
+      <rect x="600" y="60" width="120" height="60" rx="6" fill="#e7daff" stroke="#7239ea" stroke-width="2"/>
+      <text x="660" y="84" text-anchor="middle" font-size="13" font-weight="700" fill="#4a1e9c">OFFLOAD</text>
+      <text x="660" y="102" text-anchor="middle" font-size="10">tracked, 不在分母</text>
+      <text x="660" y="115" text-anchor="middle" font-size="10">sender 保持最近 rate</text>
+
+      <!-- arrows -->
+      <!-- FREE → PENDING (queued add) -->
+      <path d="M 110,135 Q 160,90 200,90" fill="none" stroke="#1a5fb4" stroke-width="1.5" marker-end="url(#arrB)"/>
+      <text x="115" y="83" font-size="10" fill="#0a3578">AddFlow (满员)</text>
+
+      <!-- FREE → ACTIVE (direct admission) -->
+      <path d="M 110,150 Q 250,200 400,110" fill="none" stroke="#1a5fb4" stroke-width="1.5" marker-end="url(#arrB)"/>
+      <text x="200" y="195" font-size="10" fill="#0a3578">AddFlow (有 slot)</text>
+
+      <!-- FREE → OFFLOAD (BDP bypass) -->
+      <path d="M 110,135 Q 350,40 600,80" fill="none" stroke="#7239ea" stroke-width="1.5" marker-end="url(#arrP)"/>
+      <text x="290" y="40" font-size="10" fill="#4a1e9c" font-weight="700">AddFlow + BDP-bypass (totalBytes ≤ BDP_BYTES)</text>
+
+      <!-- PENDING → ACTIVE (promote) -->
+      <path d="M 320,90 L 400,90" fill="none" stroke="#1a5fb4" stroke-width="1.5" marker-end="url(#arrB)"/>
+      <text x="335" y="83" font-size="10" fill="#0a3578">promote</text>
+
+      <!-- ACTIVE → PENDING (DRR demote) -->
+      <path d="M 400,110 L 320,110" fill="none" stroke="#1a5fb4" stroke-width="1.5" marker-end="url(#arrB)"/>
+      <text x="328" y="125" font-size="10" fill="#0a3578">DRR demote</text>
+
+      <!-- ACTIVE → OFFLOAD (proactive release) -->
+      <path d="M 520,90 L 600,90" fill="none" stroke="#7239ea" stroke-width="1.5" marker-end="url(#arrP)"/>
+      <text x="528" y="83" font-size="10" fill="#4a1e9c" font-weight="700">EWMA release</text>
+
+      <!-- ACTIVE → FREE (complete) -->
+      <path d="M 460,120 Q 460,180 110,160" fill="none" stroke="#1a5fb4" stroke-width="1.5" marker-end="url(#arrB)"/>
+      <text x="170" y="178" font-size="10" fill="#0a3578">completedBytes ≥ totalBytes</text>
+
+      <!-- OFFLOAD → FREE (complete) -->
+      <path d="M 660,120 Q 660,200 110,170" fill="none" stroke="#7239ea" stroke-width="1.5" marker-end="url(#arrP)"/>
+      <text x="500" y="220" font-size="10" fill="#4a1e9c">complete (剩余字节用最近 rate 跑完)</text>
+    </g>
+
+    <!-- Right column: formulas -->
+    <g transform="translate(820, 80)" font-size="12">
+      <rect x="0" y="0" width="480" height="240" rx="4" fill="#ffffff" stroke="#7aa6d9"/>
+      <text x="12" y="22" font-weight="700" fill="#0a3578">分配/释放公式</text>
+
+      <g font-family="ui-monospace, 'JetBrains Mono', Consolas, monospace" font-size="11">
+        <text x="12" y="48" fill="#0a3578" font-weight="700">▸ ACTIVE 流的公平份额 (recalculateAndNotify)</text>
+        <text x="22" y="66" fill="#222">authorizedRate = totalRecvBw / numActive</text>
+        <text x="22" y="82" fill="#666">           (OFFLOAD/PENDING 不计入分母 ⇒ 加速 ACTIVE)</text>
+
+        <text x="12" y="108" fill="#4a1e9c" font-weight="700">▸ BDP-bypass 入场 (AddFlow)</text>
+        <text x="22" y="126" fill="#222">if totalBytes ≤ NCCL_RECV_FC_BDP_BYTES:</text>
+        <text x="22" y="142" fill="#222">    state = OFFLOAD; rate = totalRecvBw</text>
+
+        <text x="12" y="168" fill="#4a1e9c" font-weight="700">▸ EWMA proactive release (ReportProgress)</text>
+        <text x="22" y="186" fill="#222">est = β·est + (1-β)·instRate   β=0.125</text>
+        <text x="22" y="202" fill="#222">if v_remain &lt; est · baseRtt · γ:    γ=1.0</text>
+        <text x="22" y="218" fill="#222">    ACTIVE → OFFLOAD (sender 不被 0-throttle)</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- ============================================================ -->
+  <!-- ③  端到端运行时路径                                            -->
+  <!-- ============================================================ -->
+  <g transform="translate(40, 1080)">
+    <rect width="1320" height="760" rx="8" fill="#ffffff" stroke="#444" stroke-width="2"/>
+    <text x="20" y="28" font-size="17" font-weight="700" fill="#1a1a1a">
+      ③ 端到端运行时数据路径
+    </text>
+    <text x="20" y="48" font-size="12" fill="#555">
+      建链时握手 control socket (地址搭在 netHandle 里捎带);  运行时控制平面用 TCP 推 ncclFcRateMsg, 数据平面照常走 ncclNet (RDMA / TCP)
+    </text>
+
+    <!-- Sender column -->
+    <g transform="translate(40, 80)">
+      <rect x="0" y="0" width="460" height="640" rx="8" fill="#fff7f0" stroke="#e8730c" stroke-width="2"/>
+      <text x="230" y="28" text-anchor="middle" font-size="15" font-weight="700" fill="#7a4513">
+        Sender Proxy (rank A)
+      </text>
+
+      <!-- Net/control socket -->
+      <g transform="translate(20, 50)" font-size="11">
+        <rect x="0" y="0" width="420" height="36" rx="4" fill="#ffe5cc" stroke="#e8730c"/>
+        <text x="10" y="22" font-weight="700" fill="#7a4513">[setup]</text>
+        <text x="60" y="22" fill="#333">sendProxyConnect: ncclNet-&gt;connect(netHandle) + ncclSocketConnect(ctrlAddr)</text>
+      </g>
+
+      <!-- fcSenderState table -->
+      <g transform="translate(20, 100)" font-size="11">
+        <rect x="0" y="0" width="420" height="120" rx="4" fill="#ffffff" stroke="#e8a570"/>
+        <text x="10" y="20" font-weight="700" fill="#7a4513">ncclFcSenderState (per recv-peer)</text>
+        <text x="10" y="40" fill="#333">controlSock: TCP, MSG_DONTWAIT 读写</text>
+        <text x="10" y="58" fill="#333">flows[NCCL_FC_SENDER_MAX_FLOWS=64]:</text>
+        <text x="22" y="74" fill="#444">  { channelId, opCount, active,</text>
+        <text x="22" y="90" fill="#444">    bucket={tokens, rate, burstSize=4·stepSize} }</text>
+        <text x="10" y="108" fill="#666" font-style="italic">按 (channelId, opCount) 线性扫</text>
+      </g>
+
+      <!-- progress loop -->
+      <g transform="translate(20, 240)" font-size="11">
+        <rect x="0" y="0" width="420" height="260" rx="4" fill="#fff3e6" stroke="#e8a570"/>
+        <text x="10" y="20" font-weight="700" fill="#7a4513">sendProxyProgress() 每一步</text>
+
+        <rect x="14" y="34" width="392" height="42" rx="3" fill="#ffffff" stroke="#bbb"/>
+        <text x="22" y="52" font-size="11" font-weight="700" fill="#0a3578">A. fcPollRateUpdates(state)</text>
+        <text x="22" y="68" font-size="10" fill="#333">recv 所有 pending msg → 更新 bucket.rate / 创建 entry / 标记 inactive</text>
+
+        <rect x="14" y="86" width="392" height="42" rx="3" fill="#ffffff" stroke="#bbb"/>
+        <text x="22" y="104" font-size="11" font-weight="700" fill="#0a3578">B. fcTokenBucketAllow(...)</text>
+        <text x="22" y="120" font-size="10" fill="#333">refill = rate·dt → tokens; tokens &gt;= size ? consume : 跳过本次 isend</text>
+
+        <rect x="14" y="138" width="392" height="42" rx="3" fill="#ffffff" stroke="#bbb"/>
+        <text x="22" y="156" font-size="11" font-weight="700" fill="#0a3578">C. ncclNet-&gt;isend(...)</text>
+        <text x="22" y="172" font-size="10" fill="#333">数据下网 (RDMA write / TCP send), 受 token bucket 节奏</text>
+
+        <rect x="14" y="190" width="392" height="60" rx="3" fill="#ffffff" stroke="#bbb"/>
+        <text x="22" y="208" font-size="11" font-weight="700" fill="#0a3578">D. on complete (sub-&gt;done == sub-&gt;nsteps)</text>
+        <text x="22" y="224" font-size="10" fill="#333">fcSenderRemoveFlow(channelId, opCount)</text>
+        <text x="22" y="240" font-size="10" fill="#666">tombstone msg (rate=0) 也走 inactive 标记</text>
+      </g>
+
+      <!-- Only P2P -->
+      <g transform="translate(20, 514)" font-size="11">
+        <rect x="0" y="0" width="420" height="46" rx="4" fill="#f8d7da" stroke="#c01c28"/>
+        <text x="10" y="20" font-weight="700" fill="#7a1620">useSendFc = (pattern == Send || pattern == Recv)</text>
+        <text x="10" y="38" fill="#333">Ring / Tree / NVLS / PAT 模式直接绕过 token bucket</text>
+      </g>
+    </g>
+
+    <!-- Middle: control socket -->
+    <g transform="translate(520, 240)" font-size="11">
+      <rect x="0" y="0" width="260" height="320" rx="6" fill="#fafafa" stroke="#666" stroke-dasharray="4 3"/>
+      <text x="130" y="22" text-anchor="middle" font-size="13" font-weight="700" fill="#222">
+        TCP 控制平面
+      </text>
+      <text x="130" y="40" text-anchor="middle" font-size="10" fill="#666">
+        独立于数据通道
+      </text>
+
+      <g transform="translate(20, 60)">
+        <rect x="0" y="0" width="220" height="105" rx="4" fill="#ffffff" stroke="#888"/>
+        <text x="10" y="18" font-weight="700">ncclFcRateMsg</text>
+        <text x="10" y="36" fill="#333">  magic: 'NFCR' (0x4E464352)</text>
+        <text x="10" y="52" fill="#333">  senderRank, channelId,</text>
+        <text x="10" y="68" fill="#333">  opCount</text>
+        <text x="10" y="84" fill="#333">  authorizedRate (bytes/s)</text>
+        <text x="10" y="100" fill="#666" font-style="italic">  (rate=0 ⇒ pause / 完成)</text>
+      </g>
+
+      <!-- arrows -->
+      <path d="M 0,200 L -40,200" fill="none" stroke="#1a5fb4" stroke-width="2" marker-end="url(#arrB)"/>
+      <text x="-60" y="195" font-size="10" fill="#0a3578" text-anchor="end">rate push</text>
+      <text x="-60" y="208" font-size="10" fill="#0a3578" text-anchor="end">(non-blocking)</text>
+
+      <path d="M 260,260 L 300,260" fill="none" stroke="#2a8055" stroke-width="2" marker-end="url(#arrG)"/>
+      <text x="280" y="252" font-size="10" fill="#1c4a32" text-anchor="middle">progress</text>
+      <text x="280" y="278" font-size="10" fill="#1c4a32" text-anchor="middle">(数据 ACKs 触发)</text>
+    </g>
+
+    <!-- Receiver column -->
+    <g transform="translate(800, 80)">
+      <rect x="0" y="0" width="480" height="640" rx="8" fill="#eef6ff" stroke="#1a5fb4" stroke-width="2"/>
+      <text x="240" y="28" text-anchor="middle" font-size="15" font-weight="700" fill="#0a3578">
+        Receiver Proxy (rank B)
+      </text>
+
+      <g transform="translate(20, 50)" font-size="11">
+        <rect x="0" y="0" width="440" height="36" rx="4" fill="#cfe2ff" stroke="#1a5fb4"/>
+        <text x="10" y="22" font-weight="700" fill="#0a3578">[setup]</text>
+        <text x="60" y="22" fill="#222">recvProxySetup: listen() + controlListen → 把地址塞进 connectInfo 回包</text>
+      </g>
+
+      <!-- ncclRecvFlowControl -->
+      <g transform="translate(20, 100)" font-size="11">
+        <rect x="0" y="0" width="440" height="170" rx="4" fill="#ffffff" stroke="#7aa6d9"/>
+        <text x="10" y="20" font-weight="700" fill="#0a3578">ncclRecvFlowControl  (per proxyState)</text>
+        <text x="10" y="40" fill="#222">totalRecvBw   ← Σ (nicBw[i])     // 来自 ① 自适应发现</text>
+        <text x="10" y="58" fill="#222">flows[512]    ← state, totalBytes, completedBytes,</text>
+        <text x="10" y="74" fill="#222">                authorizedRate, arrivalOrder, estRate, …</text>
+        <text x="10" y="92" fill="#222">numActive / numPending</text>
+        <text x="10" y="110" fill="#222">maxConcurrent (admission cap, 0=∞)</text>
+        <text x="10" y="128" fill="#222">quotaPerRound (DRR 字节配额, 0=disable)</text>
+        <text x="10" y="146" fill="#7239ea">bdpBytes / proactiveRelease / baseRttSec (guard 扩展)</text>
+        <text x="10" y="162" fill="#666">rateChangeCallback → fcRateChangeCallback (push msg)</text>
+      </g>
+
+      <!-- progress loop -->
+      <g transform="translate(20, 290)" font-size="11">
+        <rect x="0" y="0" width="440" height="270" rx="4" fill="#eaf2fc" stroke="#7aa6d9"/>
+        <text x="10" y="20" font-weight="700" fill="#0a3578">recvProxyProgress() 流程</text>
+
+        <rect x="14" y="34" width="412" height="42" rx="3" fill="#ffffff" stroke="#bbb"/>
+        <text x="22" y="52" font-size="11" font-weight="700" fill="#0a3578">A. proxyOpReady → 每条 sub 一次</text>
+        <text x="22" y="68" font-size="10" fill="#333">AddFlow(senderRank, ch, opCount, nbytes) → 触发 notify</text>
+
+        <rect x="14" y="86" width="412" height="42" rx="3" fill="#ffffff" stroke="#bbb"/>
+        <text x="22" y="104" font-size="11" font-weight="700" fill="#0a3578">B. ncclNet-&gt;irecv() + test()</text>
+        <text x="22" y="120" font-size="10" fill="#333">满管道深度 post; rate 限制在 sender 侧, 这里不限</text>
+
+        <rect x="14" y="138" width="412" height="58" rx="3" fill="#ffffff" stroke="#7239ea"/>
+        <text x="22" y="156" font-size="11" font-weight="700" fill="#4a1e9c">C. ReportProgress(完成的 bytes)</text>
+        <text x="22" y="172" font-size="10" fill="#333">完成判定 → RemoveFlow; EWMA 更新; v_remain 比较 → Release</text>
+        <text x="22" y="188" font-size="10" fill="#333">DRR remainingQuota -= bytes → 配额耗尽且有 pending ⇒ demote</text>
+
+        <rect x="14" y="206" width="412" height="48" rx="3" fill="#ffffff" stroke="#bbb"/>
+        <text x="22" y="224" font-size="11" font-weight="700" fill="#0a3578">D. rate 变化 → notifyRateChange</text>
+        <text x="22" y="240" font-size="10" fill="#333">fcRateChangeCallback → send() rate msg 到对应 senderRank</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- ============================================================ -->
+  <!-- ④ 环境变量                                                    -->
+  <!-- ============================================================ -->
+  <g transform="translate(40, 1860)">
+    <rect width="1320" height="280" rx="8" fill="#fff" stroke="#444" stroke-width="2"/>
+    <text x="20" y="28" font-size="17" font-weight="700" fill="#1a1a1a">
+      ④ 环境变量速查
+    </text>
+
+    <g transform="translate(20, 50)" font-size="11" font-family="ui-monospace, 'JetBrains Mono', Consolas, monospace">
+      <!-- header -->
+      <rect x="0" y="0" width="1280" height="26" fill="#eef3f8"/>
+      <text x="10"  y="17" font-weight="700">变量</text>
+      <text x="290" y="17" font-weight="700">默认</text>
+      <text x="380" y="17" font-weight="700">作用</text>
+
+      <!-- rows -->
+      <g transform="translate(0, 26)">
+        <rect x="0" y="0"   width="1280" height="26" fill="#d1e7dd"/>
+        <text x="10"  y="17">NCCL_RECV_FC_BW_GBS</text>
+        <text x="290" y="17">-1 (auto)</text>
+        <text x="380" y="17" fill="#1c4a32">本次新增: -1 = 走 NIC 自适应; &gt;0 ⇒ 锁死该值, 跳过 NIC 发现</text>
+
+        <rect x="0" y="26"  width="1280" height="26" fill="#ffffff"/>
+        <text x="10"  y="43">NCCL_RECV_FC_MAX_CONCURRENT</text>
+        <text x="290" y="43">0 (无限)</text>
+        <text x="380" y="43">同时 ACTIVE 流上限; 超出进 PENDING 队列, 配合 DRR 用</text>
+
+        <rect x="0" y="52"  width="1280" height="26" fill="#eef3f8"/>
+        <text x="10"  y="69">NCCL_RECV_FC_QUOTA_MB</text>
+        <text x="290" y="69">4 (DRR)</text>
+        <text x="380" y="69">每条 ACTIVE 流跑满该配额后, 若有 PENDING 则降级轮转 (0 = 关闭 DRR)</text>
+
+        <rect x="0" y="78"  width="1280" height="26" fill="#ffffff"/>
+        <text x="10"  y="95">NCCL_RECV_FC_BDP_BYTES</text>
+        <text x="290" y="95">0 (off)</text>
+        <text x="380" y="95" fill="#4a1e9c">Guard-style BDP-bypass: totalBytes ≤ 此值的小流直接走 OFFLOAD, 满速放行</text>
+
+        <rect x="0" y="104" width="1280" height="26" fill="#eef3f8"/>
+        <text x="10"  y="121">NCCL_RECV_FC_PROACTIVE_RELEASE</text>
+        <text x="290" y="121">0 (off)</text>
+        <text x="380" y="121" fill="#4a1e9c">Guard-style EWMA release: 接近完成时 ACTIVE→OFFLOAD, 让剩余流加速</text>
+
+        <rect x="0" y="130" width="1280" height="26" fill="#ffffff"/>
+        <text x="10"  y="147">NCCL_RECV_FC_BASE_RTT_US</text>
+        <text x="290" y="147">22</text>
+        <text x="380" y="147" fill="#4a1e9c">EWMA release 阈值里的 baseRtt: v_remain &lt; est_rate · baseRtt · γ 时释放</text>
+      </g>
+    </g>
+
+    <text x="20" y="265" font-size="11" fill="#666" font-style="italic">
+      所有变量默认值都让 unmodified run 行为 = 无 FC 的 baseline (除了已建好的 TCP 控制 socket overhead)
+    </text>
+  </g>
+
+  <!-- ============================================================ -->
+  <!-- ⑤ 作用范围 / 豁免                                              -->
+  <!-- ============================================================ -->
+  <g transform="translate(40, 2160)">
+    <rect width="1320" height="340" rx="8" fill="#f8d7da" stroke="#c01c28" stroke-width="2"/>
+    <text x="20" y="28" font-size="17" font-weight="700" fill="#7a1620">
+      ⑤ 作用范围与豁免  (重要 — 不要误用)
+    </text>
+
+    <g transform="translate(20, 50)">
+      <!-- Applied -->
+      <g>
+        <rect x="0" y="0" width="630" height="240" rx="6" fill="#ffffff" stroke="#2a8055"/>
+        <text x="315" y="24" text-anchor="middle" font-size="14" font-weight="700" fill="#1c4a32">✓ 启用 FC 的场景 (P2P only)</text>
+        <g transform="translate(20, 44)" font-size="12">
+          <text x="0" y="0"  font-weight="700" fill="#1c4a32">通信模式:</text>
+          <text x="0" y="20" fill="#222">  ncclSend / ncclRecv  (pattern == ncclPatternSend / Recv)</text>
+          <text x="0" y="38" fill="#222">  ncclAllToAll, AllToAllv  (每对 peer 各起一条 P2P)</text>
+          <text x="0" y="56" fill="#222">  Gather / Scatter  (在 P2P 通道上展开时)</text>
+
+          <text x="0" y="86" font-weight="700" fill="#1c4a32">典型受益:</text>
+          <text x="0" y="106" fill="#222">  • Expert Parallel / MoE 的跨节点 AlltoAll</text>
+          <text x="0" y="124" fill="#222">  • Pipeline Parallel 跨 stage Send/Recv 重叠时的 incast</text>
+          <text x="0" y="142" fill="#222">  • 推理时 KV-cache / activation 的点对点流</text>
+
+          <text x="0" y="172" font-weight="700" fill="#1c4a32">瓶颈匹配度:</text>
+          <text x="0" y="190" fill="#222">  瓶颈在接收方 NIC ingress 时最有效 (典型 many→one incast)</text>
+        </g>
+      </g>
+
+      <!-- Exempt -->
+      <g transform="translate(650, 0)">
+        <rect x="0" y="0" width="630" height="240" rx="6" fill="#ffffff" stroke="#c01c28"/>
+        <text x="315" y="24" text-anchor="middle" font-size="14" font-weight="700" fill="#7a1620">✗ 豁免的场景 (集合通信)</text>
+        <g transform="translate(20, 44)" font-size="12">
+          <text x="0" y="0"  font-weight="700" fill="#7a1620">通信算法:</text>
+          <text x="0" y="20" fill="#222">  Ring (AllReduce / AllGather / ReduceScatter)</text>
+          <text x="0" y="38" fill="#222">  Tree (AllReduce)</text>
+          <text x="0" y="56" fill="#222">  NVLS / NVLS-Tree, PAT, CollNet 等</text>
+
+          <text x="0" y="86" font-weight="700" fill="#7a1620">豁免原因 (代码层):</text>
+          <text x="0" y="106" fill="#222">  net.cc 中 useFlowControl / useSendFc 同时检查</text>
+          <text x="0" y="124" fill="#222">  pattern == ncclPatternSend || ncclPatternRecv</text>
+          <text x="0" y="142" fill="#222">  其他 pattern 一律绕过, 不创建 sender bucket, 不 AddFlow</text>
+
+          <text x="0" y="172" font-weight="700" fill="#7a1620">豁免原因 (语义层):</text>
+          <text x="0" y="190" fill="#222">  Ring/Tree 全局同步推进 — 任一 rank 被限速会拖死整条流水线</text>
+          <text x="0" y="208" fill="#222">  Fair-share 在 N-to-N 同速场景下也没有意义</text>
+        </g>
+      </g>
+    </g>
+
+    <text x="660" y="320" text-anchor="middle" font-size="11" fill="#7a1620" font-style="italic">
+      训练负载里 collective 流量仍会占用同一张 NIC — FC 对此无感知, totalRecvBw 不会因为 AllReduce 在跑而下调
+    </text>
+  </g>
+</svg>
